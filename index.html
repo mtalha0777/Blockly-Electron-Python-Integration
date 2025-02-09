@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Blockly App</title>
+  <script src="node_modules/blockly/blockly_compressed.js"></script>
+  <script src="node_modules/blockly/blocks_compressed.js"></script>
+  <script src="node_modules/blockly/msg/en.js"></script>
+  <style>
+    #blocklyDiv { height: 80vh; width: 100%; }
+  </style>
+</head>
+<body>
+  <div id="blocklyDiv"></div>
+  <button onclick="compile()">Compile</button>
+  <button onclick="run()">Run</button>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    // Define the database_fetch block
+    Blockly.Blocks['database_fetch'] = {
+      init: function() {
+        this.appendDummyInput()
+          .appendField("Fetch from database")
+          .appendField(new Blockly.FieldDropdown([
+            ['tag_1','tag_1'], 
+            ['tag_2','tag_2'],
+            ['tag_3','tag_3'],
+            ['tag_4','tag_4']
+          ]), 'TAG');
+        this.setOutput(true, 'Number');
+      }
+    };
+
+    // Inject Blockly workspace with toolbox
+    const workspace = Blockly.inject('blocklyDiv', {
+      toolbox: `
+        <xml>
+          <block type="controls_if"></block>
+          <block type="controls_for"></block>
+          <block type="database_fetch"></block>
+          <block type="math_arithmetic"></block>
+        </xml>
+      `
+    });
+
+    // Compile function: converts blocks into CSV format and sends it to the main process
+    function compile() {
+      const xml = Blockly.Xml.workspaceToDom(workspace);
+      const csvData = [];
+
+      Array.from(xml.getElementsByTagName('block')).forEach(block => {
+        const type = block.getAttribute('type');
+        const id = block.getAttribute('id');
+        const fields = Array.from(block.getElementsByTagName('field'))
+          .reduce((acc, field) => {
+            acc[field.getAttribute('name')] = field.textContent;
+            return acc;
+          }, {});
+
+        csvData.push(`${id},${type},${JSON.stringify(fields)}`);
+      });
+
+      const csvContent = 'id,type,params\n' + csvData.join('\n');
+
+      // Send CSV data to main process for saving
+      ipcRenderer.send('save-csv', csvContent);
+    }
+
+    // Run function: sends a message to main process to execute the Python script
+    function run() {
+      console.log("Sending request to run Python script...");
+      ipcRenderer.send('run-python');
+    }
+
+    // Listen for Python process messages (logging output/error)
+    ipcRenderer.on('python-output', (event, output) => {
+      console.log('Python Output:', output);
+    });
+
+    ipcRenderer.on('python-error', (event, error) => {
+      console.error('Python Error:', error);
+    });
+
+    ipcRenderer.on('python-exit', (event, code) => {
+      console.log(`Python script finished with exit code: ${code}`);
+    });
+
+    // WebSocket connection to receive status updates from Python
+    let socket;
+    function connectWebSocket() {
+      socket = new WebSocket('ws://localhost:8765');
+
+      socket.onopen = () => {
+        console.log("Connected to WebSocket server");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          // Expecting a JSON array of statuses in the format:
+          // [{ id: "<block_id>", status: "success" }, ...]
+          const statuses = JSON.parse(event.data);
+          statuses.forEach(status => {
+            const block = workspace.getBlockById(status.id);
+            if (block) {
+              // Set block color: green for success, red for error/failure
+              block.setColour(status.status === 'success' ? '#00ff00' : '#ff0000');
+            }
+          });
+        } catch (error) {
+          console.error("Received invalid JSON:", event.data);
+        }
+        console.log(statuses)
+      };
+
+      socket.onclose = () => {
+        console.warn("WebSocket disconnected. Reconnecting in 5 seconds...");
+        setTimeout(connectWebSocket, 5000);
+      };
+    }
+
+    // Start the WebSocket connection immediately
+    connectWebSocket();
+  </script>
+</body>
+</html>
